@@ -32,13 +32,42 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
+import os
 import socket
 import sys
 import time
 from datetime import datetime
 
 DEFAULT_SOCKET = "/var/run/dpdk/rte/dpdk_telemetry.v2"
+
+
+def find_telemetry_socket(preferred: str) -> str:
+    """探测可用的 telemetry 套接字路径。
+    新版 DPDK 会创建两个文件:
+      dpdk_telemetry.v2          —— 监听 socket, 直连会报 EPROTOTYPE
+      dpdk_telemetry.v2.<pid>    —— 实际通信的连接 socket, 应连这个
+    优先级: 用户指定 > *.pid 形式 > 默认路径。逐个试连, 能连上即用。"""
+    candidates: list[str] = []
+    if preferred != DEFAULT_SOCKET:
+        candidates.append(preferred)
+    # pid 后缀的连接 socket, pid 大的大概率是最近启动的进程
+    candidates += sorted(glob.glob(DEFAULT_SOCKET + ".*"),
+                         key=lambda p: p.rsplit(".", 1)[-1], reverse=True)
+    candidates.append(DEFAULT_SOCKET)
+
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect(path)
+            return path
+        except OSError:
+            continue
+    return preferred   # 一个都连不上, 返回原值让上层报原始错误
 
 
 # --------------------------------------------------------------------------- #
@@ -144,13 +173,18 @@ def main() -> None:
               "(pip3 install matplotlib)")
         plt = None
 
-    client = TelemetryClient(args.socket)
+    sock_path = find_telemetry_socket(args.socket)
+    if sock_path != args.socket:
+        print(f"[信息] 自动选择 telemetry 套接字: {sock_path}")
+    client = TelemetryClient(sock_path)
     try:
         first = sample_once(client, args.port)
     except (FileNotFoundError, ConnectionError, socket.error) as exc:
-        sys.exit(f"[错误] 连不上 telemetry 套接字 {args.socket}: {exc}\n"
+        sys.exit(f"[错误] 连不上 telemetry 套接字 {sock_path}: {exc}\n"
                  f"       请确认 testpmd 已在本机运行; 套接字由 root 创建, "
-                 f"通常需要 sudo 运行本脚本。")
+                 f"通常需要 sudo 运行本脚本。\n"
+                 f"       可用 ls /var/run/dpdk/rte/ 查看实际套接字文件, "
+                 f"用 -s 指定。")
     if not first:
         sys.exit("[错误] telemetry 里没有找到任何端口统计, 检查 testpmd 状态。")
 
