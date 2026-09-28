@@ -91,25 +91,34 @@ def find_telemetry_socket(preferred: str) -> str:
 
 
 class TelemetryClient:
-    """DPDK telemetry v2 套接字客户端 (JSON 请求/应答)"""
+    """DPDK telemetry v2 客户端 (JSON over unix socket)
+
+    版本差异自适应:
+    - 套接字类型: 旧版 SOCK_STREAM, 新版 SOCK_SEQPACKET (connect_socket 处理)
+    - banner: 21.11+ 连接后先推一条版本信息, 需先读掉
+    - /ethdev/stats: 22.11+ 不带参数返回全部端口; 21.11 及更早必须
+      逐端口传 data=<port_id> 查询 (无参数请求不回包 -> 超时),
+      ethdev_stats() 自动探测两种方式
+    """
 
     def __init__(self, path: str):
         self.path = path
         self._token = 0
 
-    def _request(self, command: str) -> dict:
+    def _request(self, command: str, data=None) -> dict:
         self._token += 1
-        req = json.dumps({"action": 0, "command": command,
-                          "token": self._token}) + "\n"
+        req = {"action": 0, "command": command, "token": self._token}
+        if data is not None:
+            req["data"] = data
         with connect_socket(self.path) as s:
-            # DPDK 21.11+ 协议: 连接后服务端先推一条 banner
-            # ({"version":..., "pid":..., "max_output_len":...}), 必须先读掉,
-            # 否则它会被当成请求应答 (是合法 JSON, 解析不会报错)
+            # banner (21.11+): 短超时读掉; 老版本无 banner 则忽略
+            s.settimeout(1.5)
             try:
                 s.recv(65536)
             except OSError:
-                pass            # 老版本无 banner, 忽略
-            s.sendall(req.encode())
+                pass
+            s.settimeout(5.0)
+            s.sendall((json.dumps(req) + "\n").encode())
             buf = b""
             while True:
                 chunk = s.recv(65536)
@@ -122,29 +131,73 @@ class TelemetryClient:
                     continue
         raise RuntimeError(f"telemetry 应答不完整: {buf[:200]!r}")
 
-    def ethdev_stats(self) -> dict[int, dict]:
-        """返回 {port_id: {"q_ipackets": [...], "q_ibytes": [...],
-                           "ipackets": N, "ibytes": N}}"""
-        resp = self._request("/ethdev/stats")
-        # 应答格式随 DPDK 版本略有差异, 兼容 data / output / 顶层
+    # ---- 应答解析: 各版本包装不同 ---- #
+
+    @staticmethod
+    def _unwrap(resp):
         for key in ("data", "output"):
             if isinstance(resp, dict) and key in resp:
                 resp = resp[key]
                 break
-        # 此时 resp 应为 {port_id_str: {...stats...}}; 若还包着一层命令名则再剥一层
-        if isinstance(resp, dict) and "/ethdev/stats" in resp:
-            resp = resp["/ethdev/stats"]
+        return resp
 
-        result: dict[int, dict] = {}
+    @staticmethod
+    def _find_qstats(obj):
+        """深度搜索第一个含 q_ipackets 的 dict"""
+        if isinstance(obj, dict):
+            if "q_ipackets" in obj:
+                return obj
+            for v in obj.values():
+                r = TelemetryClient._find_qstats(v)
+                if r is not None:
+                    return r
+        elif isinstance(obj, list):
+            for v in obj:
+                r = TelemetryClient._find_qstats(v)
+                if r is not None:
+                    return r
+        return None
+
+    def list_ports(self) -> list[int]:
+        """/ethdev/list -> 端口号列表; 应答形如 {"0": "net_xxx", ...}"""
+        resp = self._unwrap(self._request("/ethdev/list"))
         if not isinstance(resp, dict):
-            return result
-        for k, v in resp.items():
+            return []
+        for v in resp.values():       # 可能再包一层
+            if isinstance(v, dict):
+                resp = v
+                break
+        return sorted(int(k) for k, v in resp.items()
+                      if str(k).isdigit() and isinstance(v, str))
+
+    def ethdev_stats(self) -> dict[int, dict]:
+        """返回 {port_id: {"q_ipackets": [...], "q_ibytes": [...]}}"""
+        # 方式一 (22.11+): 不带参数, 一次返回全部端口
+        try:
+            resp = self._unwrap(self._request("/ethdev/stats"))
+            if isinstance(resp, dict) and "/ethdev/stats" in resp:
+                resp = resp["/ethdev/stats"]
+            result = {}
+            if isinstance(resp, dict):
+                for k, v in resp.items():
+                    if str(k).isdigit() and isinstance(v, dict) \
+                            and "q_ipackets" in v:
+                        result[int(k)] = v
+            if result:
+                return result
+        except (OSError, RuntimeError):
+            pass
+        # 方式二 (21.11 及更早): 逐端口查询, data=<port_id>
+        result = {}
+        for port in self.list_ports():
             try:
-                port = int(k)
-            except (TypeError, ValueError):
+                resp = self._unwrap(
+                    self._request("/ethdev/stats", data=port))
+            except (OSError, RuntimeError):
                 continue
-            if isinstance(v, dict) and "q_ipackets" in v:
-                result[port] = v
+            d = self._find_qstats(resp)
+            if d is not None:
+                result[port] = d
         return result
 
 
