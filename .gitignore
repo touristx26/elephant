@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+uv.lock
+
+# 场景生成产物 (pcap 可达 GB 级, 不入库)
+dpdk_out/
+
+# 采集输出
+rx_stats.*
+*.png
+*.csv

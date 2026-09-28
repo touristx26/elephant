@@ -1,0 +1,37 @@
+# 大象流 pcap 场景配置
+# 用法: uv run main.py -c config.yaml
+# 键名与命令行参数一致 (bg-src-ip / bg_src_ip 均可)
+# 命令行显式传参优先于本文件, 便于临时覆盖个别值:
+#   uv run main.py -c config.yaml --elephant-pps 20000
+
+# ===== 输出 =====
+out-dir: dpdk_out     # 输出目录 (生成 scenario.pcap)
+seed: 42              # 随机种子, 固定后场景可复现
+duration: 10          # 一轮场景总时长秒数
+repeat: 1             # 场景重复拼接次数, 在时间轴上顺延加长 pcap
+nano: false           # pcap 纳秒时间戳 (默认微秒)
+
+# ===== 背景流 =====
+# 源 IP / 源 MAC 从范围随机抽取 (流标识 ~3s 更换一次)
+# 目的 IP / 目的 MAC 固定
+bg-src-ip: 172.16.0.0/16          # 源 IP 随机范围 (CIDR 或逗号分隔)
+bg-src-mac: 02:00:00:00:01:00     # 源 MAC 池基址
+bg-src-mac-count: 256             # 源 MAC 池大小 (基址起连续递增, 最多 4096)
+bg-dst-ip: 192.168.2.1               # 目的 IP (固定, 单个地址)
+bg-dst-mac: 66:66:66:32:A3:DF     # 目的 MAC (固定); 建议填接收端网卡 MAC
+
+# ===== 大象流 =====
+# 每条大象流块首从范围随机定源, 块内固定 (整块为一条流)
+el-src-ip: 172.17.0.0/16          # 源 IP 随机范围
+el-src-mac: 03:00:00:00:02:00     # 源 MAC 池基址
+el-src-mac-count: 64              # 源 MAC 池大小
+el-dst-ip: 192.168.2.1               # 目的 IP (固定)
+el-dst-mac: 66:66:66:32:A3:DF     # 目的 MAC (固定)
+
+# ===== 速率与节奏 =====
+normal-pps: 100          # 背景流速率 pkt/s (泊松到达)
+bg-packets-per-flow: 8   # 背景流每条流最大包数 (硬上限, 每条流在 1..N 内随机)
+elephant-pps: 86000      # 大象流速率 pkt/s; 86000 x 1454B ≈ 1 Gbps
+elephant-size: 1400      # 大象流载荷字节
+elephant-duration: 0.5    # 单条大象流持续秒数
+elephant-interval: 1.5     # 背景块时长(即大象流出现间隔)秒数; 0 = 无背景块, 纯大象流
