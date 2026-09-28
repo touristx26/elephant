@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import glob
 import json
 import os
@@ -43,16 +44,32 @@ from datetime import datetime
 DEFAULT_SOCKET = "/var/run/dpdk/rte/dpdk_telemetry.v2"
 
 
+def connect_socket(path: str) -> socket.socket:
+    """连接 telemetry 套接字, 自动尝试 SOCK_STREAM / SOCK_SEQPACKET。
+    DPDK 各版本 telemetry 套接字类型不同: 旧版 STREAM, 新版 SEQPACKET,
+    用 STREAM 连 SEQPACKET 的套接字会报 EPROTOTYPE (errno 91)。"""
+    last_err: OSError | None = None
+    for stype in (socket.SOCK_STREAM, socket.SOCK_SEQPACKET):
+        s = socket.socket(socket.AF_UNIX, stype)
+        s.settimeout(5.0)
+        try:
+            s.connect(path)
+            return s
+        except OSError as exc:
+            last_err = exc
+            s.close()
+            if exc.errno not in (errno.EPROTOTYPE, errno.EPROTONOSUPPORT):
+                raise          # 文件不存在/权限等错误, 换类型也没用
+    raise last_err  # type: ignore[misc]
+
+
 def find_telemetry_socket(preferred: str) -> str:
     """探测可用的 telemetry 套接字路径。
-    新版 DPDK 会创建两个文件:
-      dpdk_telemetry.v2          —— 监听 socket, 直连会报 EPROTOTYPE
-      dpdk_telemetry.v2.<pid>    —— 实际通信的连接 socket, 应连这个
     优先级: 用户指定 > *.pid 形式 > 默认路径。逐个试连, 能连上即用。"""
     candidates: list[str] = []
     if preferred != DEFAULT_SOCKET:
         candidates.append(preferred)
-    # pid 后缀的连接 socket, pid 大的大概率是最近启动的进程
+    # pid 后缀的连接 socket (部分版本存在), pid 大的大概率是最近启动的进程
     candidates += sorted(glob.glob(DEFAULT_SOCKET + ".*"),
                          key=lambda p: p.rsplit(".", 1)[-1], reverse=True)
     candidates.append(DEFAULT_SOCKET)
@@ -61,9 +78,7 @@ def find_telemetry_socket(preferred: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(2.0)
-                s.connect(path)
+            connect_socket(path).close()
             return path
         except OSError:
             continue
@@ -86,9 +101,7 @@ class TelemetryClient:
         self._token += 1
         req = json.dumps({"action": 0, "command": command,
                           "token": self._token}) + "\n"
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(5.0)
-            s.connect(self.path)
+        with connect_socket(self.path) as s:
             s.sendall(req.encode())
             buf = b""
             while True:
