@@ -102,6 +102,13 @@ class TelemetryClient:
         req = json.dumps({"action": 0, "command": command,
                           "token": self._token}) + "\n"
         with connect_socket(self.path) as s:
+            # DPDK 21.11+ 协议: 连接后服务端先推一条 banner
+            # ({"version":..., "pid":..., "max_output_len":...}), 必须先读掉,
+            # 否则它会被当成请求应答 (是合法 JSON, 解析不会报错)
+            try:
+                s.recv(65536)
+            except OSError:
+                pass            # 老版本无 banner, 忽略
             s.sendall(req.encode())
             buf = b""
             while True:
