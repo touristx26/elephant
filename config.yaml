@@ -29,9 +29,11 @@ el-dst-ip: 192.168.2.1               # 目的 IP (固定)
 el-dst-mac: 66:66:66:32:A3:DF     # 目的 MAC (固定)
 
 # ===== 速率与节奏 =====
-normal-pps: 100          # 背景流速率 pkt/s (泊松到达)
+# 目标: 背景流包数占大头, 大象流以短时高强度脉冲突发出现
+# 每周期 (interval + duration) 包数比 ≈ 背景 30000 : 大象 10000 (背景 ~75%)
+normal-pps: 10000          # 背景流速率 pkt/s (泊松到达)
 bg-packets-per-flow: 8   # 背景流每条流最大包数 (硬上限, 每条流在 1..N 内随机)
-elephant-pps: 86000      # 大象流速率 pkt/s; 86000 x 1454B ≈ 1 Gbps
+elephant-pps: 500000      # 大象流突发速率 pkt/s; 50000 x 1400B ≈ 560 Mbps (如需 1 Gbps 突发可改 86000)
 elephant-size: 1400      # 大象流载荷字节
-elephant-duration: 0.5    # 单条大象流持续秒数
-elephant-interval: 1.5     # 背景块时长(即大象流出现间隔)秒数; 0 = 无背景块, 纯大象流
+elephant-duration: 0.2    # 单次突发持续秒数 (短脉冲)
+elephant-interval: 3.0     # 背景块时长(即突发间隔)秒数; 0 = 无背景块, 纯大象流

@@ -15,8 +15,8 @@ pcap 包序为分块结构 (时间轴上严格顺序):
 - 背景流块: 泊松到达小包 (70% UDP / 30% TCP)。每条流最多 bg-packets-per-flow
   个包 (硬上限) 即切换新流; 新流五元组强制避开最近用过的 (防随机碰撞把
   多条小流粘成伪大象流) —— 高频、少量包、大量流
-- 大象流块: 块首随机定源, 块内五元组完全一致 (整块一条流), TCP "PA" 大包
-  + FIN 收尾
+- 大象流块: 块首随机定一条流, 块内五元组完全一致 (整块一条流),
+  各块的五元组全局互不重复; TCP "PA" 大包 + FIN 收尾
 
 用法:
     uv run main.py                        # 纯默认参数
@@ -150,12 +150,18 @@ def gen_bg_block(t0: float, t1: float, args, bg: dict):
         t += random.expovariate(max(1.0, args.normal_pps))
 
 
-def gen_elephant_block(t0: float, args, el: dict):
-    """大象流块: [t0, t0+duration) 内一条固定流 (块首随机定源), 结尾补 FIN"""
-    src_ip = random.choice(el["src_ips"])
-    src_mac = random.choice(el["src_macs"])
-    sport = random.randint(30000, 60000)
-    dport = random.choice((80, 443, 445, 8443))  # http/https/smb 风格端口
+def gen_elephant_block(t0: float, args, el: dict, used: set):
+    """大象流块: [t0, t0+duration) 内一条固定流 (块首随机定源, 与历史
+    各块五元组互不重复), 结尾补 FIN。used 由调用方跨块持有。"""
+    for _ in range(64):                          # 重试直到五元组未用过
+        src_ip = random.choice(el["src_ips"])
+        src_mac = random.choice(el["src_macs"])
+        sport = random.randint(30000, 60000)
+        dport = random.choice((80, 443, 445, 8443))  # http/https/smb 风格端口
+        key = (src_ip, src_mac, sport, dport)
+        if key not in used:
+            used.add(key)
+            break
     seq = 1000
     inter = 1.0 / args.elephant_pps
     end = t0 + args.elephant_duration
@@ -177,6 +183,7 @@ def build_scenario_events(args, bg: dict, el: dict, stats: dict):
     """交替分块: 背景块(约 interval 秒, ±20% 抖动) -> 大象块(duration 秒) -> ...
     严格时间顺序生成; stats 累计大象流条数"""
     t = 0.0
+    used_el: set = set()        # 跨块持有, 保证各大象块五元组全局唯一
     while t < args.duration:
         # 背景流块
         gap = args.elephant_interval * random.uniform(0.8, 1.2)
@@ -186,7 +193,7 @@ def build_scenario_events(args, bg: dict, el: dict, stats: dict):
         if t >= args.duration:
             break
         # 大象流块
-        yield from gen_elephant_block(t, args, el)
+        yield from gen_elephant_block(t, args, el, used_el)
         stats["bursts"] += 1
         t += args.elephant_duration
 
@@ -213,9 +220,9 @@ def write_pcap(args, bg: dict, el: dict, path: str) -> tuple[int, int]:
                 w.write_packet(pkt)
                 n_pkts += 1
                 if n_pkts >= next_progress:     # 进度提示 (纯构造也要跑很久)
-                    print(f"  ... {n_pkts} pkts "
-                          f"({n_pkts / max(1, total_est * args.repeat) * 100:.0f}%)",
-                          flush=True)
+                    # total_est 已含 repeat, 勿再乘; 估算偏小时封顶 100%
+                    pct = min(100.0, n_pkts / max(1, total_est) * 100)
+                    print(f"  ... {n_pkts} pkts ({pct:.0f}%)", flush=True)
                     next_progress += 100_000
     finally:
         w.close()
@@ -337,7 +344,7 @@ def main() -> None:
     print(f"背景块 : {args.normal_pps} pkt/s 小包, 每流 ≤{max(1, args.bg_packets_per_flow)} 包, "
           f"约 {args.elephant_interval:.1f}s/块 (±20%)")
     print(f"大象块 : {args.elephant_pps} pkt/s x {args.elephant_size}B, "
-          f"持续 {args.elephant_duration:.1f}s, 块内五元组一致 "
+          f"持续 {args.elephant_duration:.1f}s, 每块一条流, 块间五元组唯一 "
           f"(≈{args.elephant_pps * (args.elephant_size + 54) * 8 / 1e6:.0f} Mbps)")
     print(f"场景   : {args.duration:.0f}s x {max(1, args.repeat)} 轮")
     print("-" * 70, flush=True)
